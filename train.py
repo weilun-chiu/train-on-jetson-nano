@@ -12,40 +12,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
-data_dir = './Crema'
 train_dir = './Train'
 valid_dir = './Valid'
 
-emotion_dict = defaultdict(list)
-emotion2idx_dict = {}
-idx2emotion_dict = {}
-train_data_ratio = 0.88
+spectrogram_length = 395
+feature_size = 513
+emotion2idx_dict = {'ANG': 0, 'NEU': 1, 'DIS': 2, 'SAD': 3, 'FEA': 4, 'HAP': 5}
+idx2emotion_dict = {0: 'ANG', 1: 'NEU', 2: 'DIS', 3: 'SAD', 4: 'FEA', 5: 'HAP'}
 
-# collect files with same emotion into a dictionary
-for idx, filename in enumerate(os.listdir(data_dir)):
-    emotion = filename.split('_')[2]
-    emotion_dict[emotion].append(filename)
 
-# create training and validation datasets
-os.makedirs(train_dir)
-os.makedirs(valid_dir)
-
-for idx, emotion in enumerate(emotion_dict):
-    emotion2idx_dict[emotion] = idx
-    idx2emotion_dict[idx] = emotion
-    
-    random.shuffle(emotion_dict[emotion])
-
-    split_point = int(len(emotion_dict[emotion]) * train_data_ratio)
-    train_split = emotion_dict[emotion][:split_point]
-    valid_split = emotion_dict[emotion][split_point:]
-
-    for filename in train_split:
-        shutil.copy2(os.path.join(data_dir, filename), train_dir)
-    
-    for filename in valid_split:
-        shutil.copy2(os.path.join(data_dir, filename), valid_dir)
-        
 class Speech_Dataset(Dataset):
     def __init__(self, data_dir, emotion2idx_dict, spectrogram_length):
         self.data_dir = data_dir
@@ -87,24 +62,11 @@ class Speech_Dataset(Dataset):
         
         return np.expand_dims(spectrogram.astype(np.float32), axis=0) , label
     
-# find the longest spectrogram length in the training dataset
-spectrogram_length = 0
-feature_size = 0
-
-for filename in os.listdir(train_dir):
-    speech_audio, _ = librosa.load(os.path.join(train_dir, filename), sr = 16000 * 0.8)
-    spectrogram = librosa.stft(speech_audio, n_fft=1024, hop_length=160, center=False, win_length=1024)
-    spectrogram = abs(spectrogram)
-    feature_size, length = spectrogram.shape
-
-    if length > spectrogram_length:
-        spectrogram_length = length
-
 # create training and validation datasets and dataloaders
 train_dataset = Speech_Dataset(train_dir, emotion2idx_dict, spectrogram_length)
 valid_dataset = Speech_Dataset(valid_dir, emotion2idx_dict, spectrogram_length)
 
-train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=1)
 valid_dataloader = DataLoader(valid_dataset, batch_size=1)
 
 class SpectrogramCNN(nn.Module):
@@ -119,7 +81,8 @@ class SpectrogramCNN(nn.Module):
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
         
         # Linear layer with reduced precision (FP16)
-        self.fc1 = nn.Linear(1605632, 64).to(torch.float16)
+        self.fc1 = nn.Linear(16 * 64 * 49, 64)
+        #.to(torch.float16)
         
         
         # The last linear layer, operates in FP32
@@ -131,24 +94,31 @@ class SpectrogramCNN(nn.Module):
         x = self.pool(self.relu(self.bn1(self.conv1(x))))
         x = self.pool(self.relu(self.bn2(self.conv2(x))))
         x = self.pool(self.relu(self.bn3(self.conv3(x))))
-        x = x.reshape(-1)
-        x = x.to(torch.float16)
+        x = x.view(-1, 16 * 64 * 49)
+        #x = x.to(torch.float16)
         x = self.fc1(x)
-        x = x.to(torch.float32)
+        #x = x.to(torch.float32)
         x = self.relu(x)
         x = self.fc2(x)
         return x
     
 # create directory for saving the checkpoint files
 checkpoint_dir = './checkpoint'
-os.makedirs(checkpoint_dir)
+#os.makedirs(checkpoint_dir)
 
 num_classes = len(emotion2idx_dict)
-num_epochs = 15
+num_epochs = 2
 
 # Remember to change the output filename and model
+if torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
+print(f'using device {device}')
 output_filename = os.path.join(checkpoint_dir, 'SpectrogramCNN.pth')
 model = SpectrogramCNN(num_classes)
+
+model.to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -157,15 +127,19 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 start_time = time.time()
 
 for epoch in range(num_epochs):
-    model.train()
+    #model.train()
     total_loss = 0
     correct_predictions = 0
     total_samples = 0
     
     for i, (inputs, labels) in enumerate(train_dataloader):
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
         optimizer.zero_grad()
+        inputs.to(device)
+        labels.to(device)
+        outputs = model(inputs)
+        #print(outputs.shape)
+        #print(labels.shape)
+        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
         
